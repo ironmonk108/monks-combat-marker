@@ -46,6 +46,18 @@ export let patchFunc = (prop, func, type = "WRAPPER") => {
     }
 }
 
+
+
+class CombatMarker extends PIXI.Sprite {
+    constructor(texture) {
+        super(texture);
+    }
+
+    get sortLayer() {
+        return PrimaryCanvasGroup.SORT_LAYERS.TOKENS - 1;
+    }
+}
+
 export class MonksCombatMarker {
     static _setting = {};
     static markerCache = {};
@@ -190,7 +202,7 @@ export class MonksCombatMarker {
                     if (token.combatMarker != undefined) {
                         token.combatMarker.destroy();
                     }
-                    const markericon = new PIXI.Sprite(tex);
+                    const markericon = new CombatMarker(tex);
                     if (highlightFile.endsWith('webm') && tex?.baseTexture?.resource?.source) {
                         tex.baseTexture.resource.source.autoplay = true;
                         tex.baseTexture.resource.source.loop = true;
@@ -209,9 +221,10 @@ export class MonksCombatMarker {
                     markericon.alpha = 0.8;
                     markericon.pulse = { value: null, dir: 1 };
                     token.combatMarker = markericon;
-                    canvas.regions.combatmarkers.addChild(token.combatMarker);
+                    canvas.primary.addChild(token.combatMarker);
                     token.combatMarker.visible = visible && token.isVisible && !MonksCombatMarker.isDefeated(token);
                     token.combatMarker._visible = visible;
+                    token.combatMarker.elevation = token.document.elevation;
                 }
 
                 if (MonksCombatMarker.markerCache[highlightFile] && !MonksCombatMarker.markerCache[highlightFile]?.baseTexture?.destroyed)
@@ -229,6 +242,7 @@ export class MonksCombatMarker {
                 const size = Math.max(token.w, token.h) * scale;
                 token.combatMarker.width = token.combatMarker.height = size;
                 token.combatMarker.alpha = 0.8;
+                token.combatMarker.elevation = token.document.elevation;
             }
 
             if (visible)
@@ -425,6 +439,11 @@ Hooks.on("updateToken", function (document, data, options, userid) {
         token.preventMarker = true;
         MonksCombatMarker.removeTurnMarker(token);
     }
+    if (token.combatMarker) {
+        if (data.elevation !== undefined) {
+            token.combatMarker.elevation = data.elevation;
+        }
+    }
 });
 
 Hooks.on("refreshToken", function (token) {
@@ -561,8 +580,4 @@ Hooks.on("destroyToken", (token) => {
         token.combatMarker.destroy();
         delete token.combatMarker;
     }
-});
-
-Hooks.on("drawRegionLayer", function (layer) {
-    layer.combatmarkers = layer.addChildAt(new PIXI.Container(), layer.children.length - 1);
 });
