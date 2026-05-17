@@ -75,5 +75,8 @@
   },
   "name": "monks-combat-marker",
   "minimumCoreVersion": "12",
-  "compatibleCoreVersion": "12"
+  "compatibleCoreVersion": "12",
+  "flags": {
+    "allowBugReporter": true
+  }
 }
