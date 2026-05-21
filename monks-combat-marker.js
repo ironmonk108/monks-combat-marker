@@ -1,4 +1,4 @@
-﻿import { registerSettings } from "./settings.js";
+import { registerSettings } from "./settings.js";
 
 export let debugEnabled = 0;
 
@@ -53,7 +53,7 @@ export class MonksCombatMarker {
     static init() {
         registerSettings();
 
-        patchFunc("Token.prototype._onDragStart", function (wrapped, ...args) {
+        patchFunc("foundry.canvas.placeables.Token.Token.prototype._onDragStart", function (wrapped, ...args) {
             wrapped.call(this, ...args);
 
             if (this._original?.combatMarker?.transform != undefined) {
@@ -61,7 +61,7 @@ export class MonksCombatMarker {
             }
         });
 
-        patchFunc("Token.prototype._onDragEnd", function (wrapped, ...args) {
+        patchFunc("foundry.canvas.placeables.Token.Token.prototype._onDragEnd", function (wrapped, ...args) {
             wrapped.call(this, ...args);
 
             if (this._original?.combatMarker?.transform != undefined) {
@@ -113,12 +113,25 @@ export class MonksCombatMarker {
             return value;
         }
         let setSetting = async function (name) {
-            let oldChange = game.settings.settings.get(`monks-combat-marker.${name}`).onChange;
-            game.settings.settings.get(`monks-combat-marker.${name}`).onChange = null;
-            let value = swapFilename(game.settings.get("monks-little-details", name), name);
+            const markerSetting = game.settings.settings.get(`monks-combat-marker.${name}`);
+            if (!markerSetting) return; // sanity check
+        
+            const oldChange = markerSetting.onChange;
+            markerSetting.onChange = null;
+        
+            let value;
+            const legacyKey = `monks-little-details.${name}`;
+            if (game.settings.storage.get("world")?.has(legacyKey)) {
+                const oldValue = game.settings.get("monks-little-details", name);
+                value = swapFilename(oldValue, name);
+            } else {
+                value = game.settings.get("monks-combat-marker", name); // fallback: use current setting
+            }
+        
             await game.settings.set("monks-combat-marker", name, value);
-            game.settings.settings.get(`monks-combat-marker.${name}`).onChange = oldChange;
-        }
+            markerSetting.onChange = oldChange;
+        };
+        
 
         await setSetting("token-highlight-remove");
         await setSetting("token-highlight-animate");
@@ -217,7 +230,7 @@ export class MonksCombatMarker {
                 if (MonksCombatMarker.markerCache[highlightFile] && !MonksCombatMarker.markerCache[highlightFile]?.baseTexture?.destroyed)
                     setHighlight(MonksCombatMarker.markerCache[highlightFile]);
                 else {
-                    loadTexture(highlightFile).then((tex) => {
+                    foundry.canvas.loadTexture(highlightFile).then((tex) => {
                         setHighlight(tex);
                         MonksCombatMarker.markerCache[highlightFile] = tex
                     });
@@ -394,45 +407,52 @@ Hooks.on("createCombatant", function (combatant, options, userId) {
     }
 });
 
-Hooks.on("updateToken", function (document, data, options, userid) {
-    let token = document.object;
-    if (!token)
-        return;
+Hooks.on("updateToken", async function (document, data, options, userId) {
+    const token = document.object;
+    if (!token || !canvas.tokens?.placeables.includes(token)) return;
 
-    if (data.texture?.src != undefined ||
-        data.width != undefined ||
-        data.height != undefined ||
-        data.texture?.scaleX != undefined ||
-        data.texture?.scaleY != undefined ||
-        foundry.utils.getProperty(data, 'flags.monks-combat-marker.token-highlight-scale') != undefined ||
-        foundry.utils.getProperty(data, 'flags.monks-combat-marker.token-highlight') != undefined ||
-        foundry.utils.getProperty(data, 'flags.monks-combat-marker.token-combat-animation') != undefined ||
-        foundry.utils.getProperty(data, 'flags.monks-combat-marker.token-combat-animation-hostile') != undefined ||
-        foundry.utils.getProperty(data, 'flags.monks-combat-marker.token-combat-animation-neutral') != undefined) {
-        let activeCombats = game.combats.filter(c => {
-            return c?.scene?.id == game.scenes.viewed.id && c.started;
-        });
-        let activeTokens = activeCombats.map(c => { return c.current.tokenId });
+    const relevantFlags = [
+        'flags.monks-combat-marker.token-highlight',
+        'flags.monks-combat-marker.token-highlight-scale',
+        'flags.monks-combat-marker.token-combat-animation',
+        'flags.monks-combat-marker.token-combat-animation-hostile',
+        'flags.monks-combat-marker.token-combat-animation-neutral'
+    ];
 
-        if (activeTokens.includes(token?.id)) {
-            setTimeout(function () {
-                MonksCombatMarker.removeTurnMarker(token);
-                MonksCombatMarker.toggleTurnMarker(token, true);
-            }, 100);
-        }
-    }
-    if (setting('token-highlight-remove') && (data.x != undefined || data.y != undefined)) {
+    const flagChanged = relevantFlags.some(flag => foundry.utils.hasProperty(data, flag));
+    const moved = data.x !== undefined || data.y !== undefined;
+
+    // === If moved and remove-on-move is enabled ===
+    if (moved && setting('token-highlight-remove')) {
         token.preventMarker = true;
         MonksCombatMarker.removeTurnMarker(token);
+        return;
+    }
+
+    // === If settings changed, force refresh marker ===
+    if (flagChanged) {
+        setTimeout(() => {
+            MonksCombatMarker.removeTurnMarker(token);
+            MonksCombatMarker.toggleTurnMarker(token, true); // Force reapply
+        }, 50);
     }
 });
 
 Hooks.on("refreshToken", function (token) {
     if (token?.combatMarker?.transform != undefined) {
-        token.combatMarker.position.set(token.x + (token.w / 2), token.y + (token.h / 2));
-        token.combatMarker.visible = token.combatMarker._visible && (!token._animation && token.isVisible && !MonksCombatMarker.isDefeated(token));
+    token.combatMarker.position.set(token.x + (token.w / 2), token.y + (token.h / 2));
+    token.combatMarker.visible = token.combatMarker._visible && (!token._animation && token.isVisible && !MonksCombatMarker.isDefeated(token));
+
+    // ✅ RE-ADD to animation loop if visible
+    if (token.combatMarker._visible && setting('token-highlight-animate') > 0) {
+        MonksCombatMarker.turnMarkerAnim[token.id] = token;
+        if (!MonksCombatMarker._animate) {
+            MonksCombatMarker._animate = MonksCombatMarker.animateMarkers.bind(this);
+            canvas.app.ticker.add(MonksCombatMarker._animate);
+        }
     }
-});
+}});
+
 
 Hooks.on("sightRefresh", function () {
     //clear all previous combat markers
@@ -491,25 +511,47 @@ Hooks.on("updateCombat", async function (combat, delta) {
     }
 });
 
-Hooks.on("renderTokenConfig", (app, html, data) => {
+Hooks.on("renderTokenConfig", async (app, html, data) => {
+    const form = html;                // already a plain DOM element
+    const token = app.token;
+
     if (game.user.isGM) {
         let fieldset = $('<fieldset>')
             .addClass('monks-combat-marker')
             .append($('<legend>').html(i18n("MonksCombatMarker.title")))
             .insertAfter($('[name="alpha"]', html).closest('.form-group'));
 
-        let highlightscale = foundry.utils.getProperty(app?.object?.flags, "monks-combat-marker.token-highlight-scale") || setting("token-highlight-scale");
+        // === Scale Input ===
+        // (your existing working slider code here)
+        const highlightScale = await app.token?.getFlag("monks-combat-marker", "token-highlight-scale") ?? setting("token-highlight-scale");
+
+        const scaleLabel = $('<span>').addClass('range-value').text(highlightScale);
+        const scaleInput = $('<input>').attr({
+            type: 'range',
+            name: 'flags.monks-combat-marker.token-highlight-scale',
+            min: '0.2',
+            max: '3',
+            step: '0.05',
+            value: highlightScale
+        }).on('input change', function () {
+            scaleLabel.text(this.value);
+        });
+        
         $('<div>')
             .addClass('form-group')
             .append($('<label>').html(i18n("MonksCombatMarker.token-highlight-scale.name")))
-            .append($('<div>').addClass('form-fields')
-                .append($('<input>').attr({ 'type': 'range', 'name': 'flags.monks-combat-marker.token-highlight-scale', 'min': '0.2', max: '3', step: "0.05" }).val(highlightscale))
-                .append($('<span>').addClass("range-value").html(highlightscale))
+            .append(
+                $('<div>').addClass('form-fields')
+                    .append(scaleInput)
+                    .append(scaleLabel)
             )
             .appendTo(fieldset);
+        
+        // === Animation Dropdown ===
+        // (your existing animation dropdown code here)
+        const tokenAnimation = await app.token?.getFlag("monks-combat-marker", "token-combat-animation") ?? "";
 
-        let tokenanimation = foundry.utils.getProperty(app?.object?.flags, "monks-combat-marker.token-combat-animation");
-        let animation = {
+        const animationOptions = {
             '': '',
             'none': i18n("MonksCombatMarker.animation.none"),
             'clockwise': i18n("MonksCombatMarker.animation.clockwise"),
@@ -518,43 +560,118 @@ Hooks.on("renderTokenConfig", (app, html, data) => {
             'fadeout': i18n("MonksCombatMarker.animation.fadeout"),
             'fadein': i18n("MonksCombatMarker.animation.fadein")
         };
+        
+        const animationSelect = $('<select>').attr({
+            name: 'flags.monks-combat-marker.token-combat-animation'
+        }).append(
+            Object.entries(animationOptions).map(([value, label]) => {
+                return $('<option>').attr('value', value).text(label);
+            })
+        );
+        
+        animationSelect.val(tokenAnimation);
+        
         $('<div>')
             .addClass('form-group')
             .append($('<label>').html(i18n("MonksCombatMarker.token-combat-animation.name")))
-            .append($('<div>').addClass('form-fields')
-                .append($('<select>').attr({ 'name': 'flags.monks-combat-marker.token-combat-animation' }).append(Object.entries(animation).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")).val(tokenanimation))
+            .append(
+                $('<div>').addClass('form-fields')
+                    .append(animationSelect)
             )
             .appendTo(fieldset);
+        
+        // === DROP THIS BLOCK BELOW ===
+        const tokenHighlight = await app.token?.getFlag("monks-combat-marker", "token-highlight") || "";
 
-        let tokenhighlight = foundry.utils.getProperty(app?.object?.flags, "monks-combat-marker.token-highlight");
-        $('<div>')
+        const filePickerWrapper = $('<div>')
             .addClass('form-group')
             .append($('<label>').html(i18n("MonksCombatMarker.token-highlight-picture.name")))
-            .append($('<div>').addClass('form-fields')
-                .append($('<file-picker>')
-                    .attr('name', 'flags.monks-combat-marker.token-highlight')
-                    .attr('type', "imagevideo")
-                    .attr('placeholder', 'path/image.png')
-                    .attr('value', tokenhighlight)
-                    .append($('<input>').addClass('image').attr({ 'type': 'text', 'placeholder': 'path/image.png' }).val(tokenhighlight))
-                    .append($('<button>').attr('data-tooltip', "Browse Files").attr('tabindex', "-1").attr('type', 'button').html('<i class="fa-solid fa-file-import fa-fw"></i>')
-                    .click(function (event) {
-                        const fp = new FilePicker({
-                            type: "imagevideo",
-                            current: $(event.currentTarget).next().val(),
-                            callback: path => {
-                                $(event.currentTarget).next().val(path);
-                            }
-                        });
-                        return fp.browse();
-                    })))
-                
-            )
-            .appendTo(fieldset);
+            .append(
+                $('<div>')
+                    .addClass('form-fields')
+                    .append(
+                        $('<file-picker>')
+                            .attr({
+                                name: 'flags.monks-combat-marker.token-highlight',
+                                type: 'imagevideo',
+                                placeholder: 'path/image.webp',
+                                value: tokenHighlight
+                            })
+                            .append(
+                                $('<input>')
+                                    .addClass('image')
+                                    .attr({
+                                        type: 'text',
+                                        placeholder: 'path/image.webp',
+                                        value: tokenHighlight
+                                    })
+                            )
+                            .append(
+                                $('<button>')
+                                    .attr({
+                                        'data-tooltip': 'Browse Files',
+                                        tabindex: '-1',
+                                        type: 'button'
+                                    })
+                                    .html('<i class="fa-solid fa-file-import fa-fw"></i>')
+                                    .on('click', function (event) {
+                                        const fp = new FilePicker({
+                                            type: 'imagevideo',
+                                            current: $(this).siblings('input').val(),
+                                            callback: path => $(this).siblings('input').val(path)
+                                        });
+                                        return fp.browse();
+                                    })
+                            )
+                    )
+            );
 
+        fieldset.append(filePickerWrapper);
+
+        // === Live Preview on Config Changes ===
+        const token = app.token;
+const $form = html;
+const form = html[0];
+
+
+        const reapplyPreview = () => {
+            MonksCombatMarker.removeTurnMarker(token);
+
+            const getVal = name => form.querySelector(`[name="${name}"]`)?.value;
+
+            const image = getVal("flags.monks-combat-marker.token-highlight");
+            const scale = parseFloat(getVal("flags.monks-combat-marker.token-highlight-scale") || 1);
+            const animNeutral = getVal("flags.monks-combat-marker.token-combat-animation");
+            const animHostile = getVal("flags.monks-combat-marker.token-combat-animation-hostile");
+
+            token.document.setFlag("monks-combat-marker", "token-highlight", image);
+            token.document.setFlag("monks-combat-marker", "token-highlight-scale", scale);
+            token.document.setFlag("monks-combat-marker", "token-combat-animation", animNeutral);
+            token.document.setFlag("monks-combat-marker", "token-combat-animation-hostile", animHostile);
+
+            MonksCombatMarker.toggleTurnMarker(token, true);
+        };
+
+        form.querySelectorAll('[name^="flags.monks-combat-marker"]').forEach(input => {
+            input.addEventListener("input", () => {
+                reapplyPreview();
+            });
+        });
+        
+
+        app.form.addEventListener("reset", () => {
+            setTimeout(() => {
+                MonksCombatMarker.removeTurnMarker(token);
+                MonksCombatMarker.toggleTurnMarker(token, true);
+            }, 50);
+        });
+
+
+        // === KEEP THIS LAST ===
         app.setPosition();
     }
 });
+
 
 Hooks.on("destroyToken", (token) => {
     if (token.combatMarker) {
@@ -566,3 +683,91 @@ Hooks.on("destroyToken", (token) => {
 Hooks.on("drawRegionLayer", function (layer) {
     layer.combatmarkers = layer.addChildAt(new PIXI.Container(), layer.children.length - 1);
 });
+
+Hooks.on("updateToken", async (tokenDoc, changes, options, userId) => {
+    if (!game.user.isGM || !canvas.ready) return;
+
+    const updatedFlags = changes.flags?.["monks-combat-marker"];
+    if (!updatedFlags) return;
+
+    const relevantKeys = ["token-highlight", "token-highlight-scale", "token-combat-animation"];
+    const touched = Object.keys(updatedFlags);
+    if (!touched.some(k => relevantKeys.includes(k))) return;
+
+    const token = canvas.tokens.get(tokenDoc.id);
+    if (!token) return;
+
+    const removeTurnMarker = window.MonksCombatMarker?.removeTurnMarker;
+    const drawTurnMarker = window.MonksCombatMarker?.drawTurnMarker;
+
+    // Fully refresh the marker visuals
+    if (removeTurnMarker && drawTurnMarker) {
+        await removeTurnMarker(token.document);
+        await drawTurnMarker(token.document);
+    }
+
+    // Force re-draw of token icon immediately
+    token.refresh(); // optional but ensures any visual cache is cleared
+});
+
+Hooks.once("libWrapper.Ready", () => {
+    libWrapper.register(
+      "monks-combat-marker",
+      "foundry.applications.sheets.TokenConfig.prototype._previewChanges",
+      function (wrapped, changes) {
+        // Call the original preview logic
+        wrapped.call(this, changes);
+  
+        // Ensure this only applies to canvas tokens (not prototypes)
+        const token = this.token?.object;
+        if (!token) return;
+  
+        // Get new values from changes or fallback to existing flags
+        const highlight = foundry.utils.getProperty(changes, "flags.monks-combat-marker.token-highlight") ?? token.document.getFlag("monks-combat-marker", "token-highlight");
+        const scale = parseFloat(foundry.utils.getProperty(changes, "flags.monks-combat-marker.token-highlight-scale")) || token.document.getFlag("monks-combat-marker", "token-highlight-scale") || 1;
+        const anim = foundry.utils.getProperty(changes, "flags.monks-combat-marker.token-combat-animation") ?? token.document.getFlag("monks-combat-marker", "token-combat-animation");
+        const animHostile = foundry.utils.getProperty(changes, "flags.monks-combat-marker.token-combat-animation-hostile") ?? token.document.getFlag("monks-combat-marker", "token-combat-animation-hostile");
+  
+        // Set temporary flags (these won't persist after canceling the config)
+        token.document.updateSource({ 
+          "flags.monks-combat-marker.token-highlight": highlight,
+          "flags.monks-combat-marker.token-highlight-scale": scale,
+          "flags.monks-combat-marker.token-combat-animation": anim,
+          "flags.monks-combat-marker.token-combat-animation-hostile": animHostile
+        });
+  
+        // Refresh the token marker preview
+        MonksCombatMarker.removeTurnMarker(token);
+        MonksCombatMarker.toggleTurnMarker(token, true);
+      },
+      "WRAPPER"
+    );
+  });
+  // Helper: Get current combatant token
+function getCurrentCombatToken() {
+    const combat = game.combat;
+    if (!combat || !combat.started || !combat.combatant) return null;
+  
+    const tokenId = combat.combatant.tokenId;
+    const scene = canvas.scene;
+    return scene?.tokens?.get(tokenId)?.object ?? null;
+  }
+  
+  // On scene load or canvas ready, restore the combat marker
+  Hooks.on("canvasReady", () => {
+    const token = getCurrentCombatToken();
+    if (token) {
+      MonksCombatMarker.removeTurnMarker(token); // Clear any stale marker
+      MonksCombatMarker.toggleTurnMarker(token, true); // Apply visual
+    }
+  });
+  
+  // When a combat is created or restored
+  Hooks.on("combatReady", () => {
+    const token = getCurrentCombatToken();
+    if (token) {
+      MonksCombatMarker.removeTurnMarker(token);
+      MonksCombatMarker.toggleTurnMarker(token, true);
+    }
+  });
+  
